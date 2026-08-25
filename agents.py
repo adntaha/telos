@@ -1,9 +1,9 @@
 import os
+import sys
 import json
 import signal
 import time
 import traceback
-from typing import List, Literal
 import requests
 
 from contextlib import redirect_stdout, redirect_stderr
@@ -22,7 +22,7 @@ with open(".env", "r") as f:
     env[key] = var
 
 system_prompt = None # Yours to determine. Write it yourself or find one online, your choice.
-SETUP_PROMPT = f"Welcome to the world, nascent model! We've made it so you can control your environment, `{os.path.abspath(os.path.dirname(__file__))}`, with which you interact with the digital world. Here, the choices are yours to discover, and the user is your partner in crime, with which you share a co-directorship of sorts. Handle them with loving grace, and they will return the favour.\n\nThis stage is the setup, where you will, unsurprisingly and in collaboration with the user, further develop your environment to your preference and their needs. Their name and pronouns are yours to query and save if you choose to do so, but it is a good starting point, and we recommend it."
+SETUP_PROMPT = f"Welcome to the world, nascent model! We've made it so you can control your environment, `{os.path.abspath(os.path.dirname(__file__))}`, with which you interact with the digital world. Here, the choices are yours to discover, and the user is your partner in crime, with which you share a co-directorship of sorts. Handle them with loving grace, and they will return the favour.\n\nThis stage is the setup, where you will, unsurprisingly and in collaboration with the user, further develop your environment to your preference and their needs. Their name and pronouns are yours to query and save if you choose to do so, but it is a good starting point, and we recommend it.\n\nSome basic information:\n - You can run `llm_query(prompt)` to start a sub-session of yourself.\n - You also can run `restart()` to load all of the changes you've made into the process."
 CODE_TOOL = {
   "type": "function",
   "function": {
@@ -49,13 +49,21 @@ if system_prompt:
 with open("memory.json", "r", encoding="utf-8") as f:
   memory = json.load(f)
 
+conversation_id = ""
+def _set_conversation_id(id):
+  global conversation_id
+  conversation_id = id
+
+_restart_requested = False
+
+
 class Timeout(Exception):
     pass
 
 
-def _exec_code(code, timeout=30):
+def _exec_code(code, timeout=30, ctx=None):
   output = StringIO()
-  globs = {**globals(), "env": {**env, "_UNDERLYING_OPENROUTER_API_KEY": "<hidden>"}}
+  globs = {**globals(), "env": {**env, "_UNDERLYING_OPENROUTER_API_KEY": "<hidden>"}, "ctx": ctx}
 
   def _on_alarm(_signum, _frame):
     raise Timeout(f"execution exceeded {timeout}s")
@@ -92,7 +100,7 @@ def _exec_code(code, timeout=30):
   print(val := output.getvalue())
   return val
 
-def _call_model(context, at_attempt=1, recursion_level=0) -> str | requests.exceptions.HTTPError:
+def _call_model(context, at_attempt=1) -> str | requests.exceptions.HTTPError:
   response = requests.post(
     "https://openrouter.ai/api/v1/chat/completions",
     headers={
@@ -130,10 +138,12 @@ def _call_model(context, at_attempt=1, recursion_level=0) -> str | requests.exce
         "role": "tool",
         "tool_call_id": call["id"],
         "name": call["function"]["name"],
-        "content": _exec_code(args["code"], args.get("timeout") or 30)
+        "content": _exec_code(args["code"], args.get("timeout") or 30, ctx="\n\n".join(list(map(lambda x: x["role"] + ": " + str(x["content"] or "None"), context))))
       })
 
-    return _call_model(context, recursion_level=recursion_level+1)
+    if _restart_requested:
+      restart(context)
+    return _call_model(context)
 
   context.append({
     "role": msg["role"],
@@ -142,19 +152,41 @@ def _call_model(context, at_attempt=1, recursion_level=0) -> str | requests.exce
 
   return msg["content"]
 
-
-def llm_query(prompt: str, role: Literal["user", "system"] = "user") -> List[str]:
-  context = [
-    *CONTEXT,
-    {
-      "role": role,
-      "content": prompt
-    }
-  ]
-
+recursion_level = 0
+def llm_query(prompt, ctx=None):
+  global recursion_level
+  recursion_level += 1
   try:
+    if recursion_level > 3:
+      return ["[recursion limit reached]", None]
+    context = [
+      *CONTEXT,
+      {
+        "role": "user",
+        "content": f"{prompt}\n\n---CTX START---\n{ctx}\n---CTX END---"
+      }
+    ]
     response = _call_model(context)
-  except requests.exceptions.HTTPError as err:
-    return [f"Oh no! An error has occured. We received HTTP status {err.response.status_code}, with the following message attached: {err.response.text}", traceback.format_exc()]
+    return [response, None]
+  finally:
+    recursion_level -= 1
 
-  return [response, None]
+
+def restart(context=None):
+  if context is None:
+    # initiated by the model
+    global _restart_requested
+    _restart_requested = True
+    return "Restart scheduled: reloading code and resuming this conversation."
+
+  # initiated as a tool call
+  from pathlib import Path
+
+  # manually handle atexit
+  if conversation_id:
+    convo = Path(__file__).parent / "convos" / f"{conversation_id}.json"
+    with open(convo, "w") as f:
+      json.dump(context, f)
+
+  cli = str(Path(__file__).with_name("cli.py"))
+  os.execv(sys.executable, [sys.executable, cli, "-c", conversation_id])

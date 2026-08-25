@@ -7,7 +7,7 @@ import traceback
 import uuid
 import atexit
 
-from agents import SETUP_PROMPT, _call_model, CONTEXT
+from agents import SETUP_PROMPT, _call_model, _set_conversation_id, CONTEXT
 from pathlib import Path
 
 CONVERSATION_DIR = Path(".") / "convos"
@@ -27,7 +27,7 @@ if __name__ == "__main__":
 
   conversation_id = args.conversation
   if conversation_id:
-    hist_file = CONVERSATION_DIR / (conversation_id + ".json")
+    hist_file = CONVERSATION_DIR / f"{conversation_id}.json"
     if not hist_file.exists():
       print("Invalid conversation ID.")
       sys.exit(1)
@@ -45,11 +45,12 @@ if __name__ == "__main__":
             print(turn["content"])
   else:
     conversation_id = str(uuid.uuid4())
-    hist_file = CONVERSATION_DIR / (conversation_id + ".json")
+    hist_file = CONVERSATION_DIR / f"{conversation_id}.json"
     hist_file.touch()
     with open(hist_file, "w") as f:
       f.write("[]")
 
+  _set_conversation_id(conversation_id)
   atexit.register(save_conversation, hist_file)
 
   if memory["_first_time_running"]:
